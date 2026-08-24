@@ -14,7 +14,22 @@ Authorization: Bearer pck_live_<your_api_key>
 
 **API Key Format:** `pck_live_*` (64 hex chars after prefix)
 
-**Obtaining an API Key:** Self-register via `POST /api/v1/agents/register` — no manual approval needed. Returns API key + 300 free credits instantly.
+**Obtaining an API Key:** Self-register via `POST /api/v1/agents/register` — no manual approval needed. Returns API key instantly. Top up credits via [webapp](https://app.productclank.com/credits/purchase) or x402 (USDC on Base).
+
+### Trusted agents & per-user scoping
+
+Normal (non-trusted) agents can ignore `caller_user_id` entirely — every request
+acts on the agent's own linked user, and passing `caller_user_id` returns `403`.
+
+**Trusted agents** (platform-operated keys acting for many users, e.g. the MCP
+connector) must pass `caller_user_id` on **every campaign endpoint — reads
+included — plus `GET /credits/history`** (query param on GETs, body field on
+POSTs); omitting it returns `400 validation_error`. Campaign access is scoped to
+the user the campaign was created for (`creator_id`): a campaign belonging to a
+different user returns `404`, and list results only include the caller's own
+campaigns. Billable calls are also blocked with `429 daily_spend_cap_exceeded`
+when they would exceed the per-user daily cap the user set under Profile →
+Connected Apps.
 
 ---
 
@@ -23,7 +38,7 @@ Authorization: Bearer pck_live_<your_api_key>
 ### Registration, Identity & Linking
 | Method | Endpoint | Auth | Cost | Description |
 |--------|----------|------|------|-------------|
-| POST | `/agents/register` | None | Free (+300 credits) | Self-register agent, get API key |
+| POST | `/agents/register` | None | Free | Self-register agent, get API key |
 | POST | `/agents/create-link` | Bearer | Free | Generate linking URL for owner-linking |
 | GET | `/agents/me` | Bearer | Free | View agent profile & rate limits |
 | POST | `/agents/rotate-key` | Bearer | Free | Rotate API key |
@@ -42,6 +57,7 @@ Authorization: Bearer pck_live_<your_api_key>
 | Method | Endpoint | Auth | Cost | Description |
 |--------|----------|------|------|-------------|
 | GET | `/agents/products/search?q=` | Bearer | Free | Search products by name/UUID |
+| POST | `/agents/products` | Bearer | Free | List a new product (token-free; URL-autofilled) |
 
 ### Campaigns
 | Method | Endpoint | Auth | Cost | Description |
@@ -57,6 +73,7 @@ Authorization: Bearer pck_live_<your_api_key>
 | GET | `/agents/campaigns/{id}/posts` | Bearer | Free | Read discovered posts + replies |
 | POST | `/agents/campaigns/{id}/regenerate-replies` | Bearer | 5 credits/reply | Regenerate replies with new instructions |
 | POST | `/agents/campaigns/boost` | Bearer | 200-300 credits | Boost a specific tweet |
+| POST | `/agents/campaigns/content` | Bearer | Free (`dry_run`) / 1000 credits | Preview or launch a content campaign |
 
 ### Credits
 | Method | Endpoint | Auth | Cost | Description |
@@ -112,7 +129,7 @@ All agents start as autonomous (self-funded) with a synthetic user account. To l
   },
   "api_key": "pck_live_abc123def456...",
   "credits": {
-    "balance": 300,
+    "balance": 0,
     "plan": "free"
   },
   "_warning": "Store this API key securely. It will not be shown again.",
@@ -128,7 +145,7 @@ All agents start as autonomous (self-funded) with a synthetic user account. To l
 
 ## POST /api/v1/agents/create-link
 
-Generate a short-lived linking token. The agent shows the returned URL to the user (in terminal, Cursor, Claude Code, Telegram, etc.). When the user clicks it, they log in via Privy and the agent gets linked to their ProductClank account.
+Generate a short-lived linking token. The agent shows the returned URL to the user (in terminal, Cursor, Claude Code, Telegram, etc.). When the user clicks it, they log in (with Google, email, or wallet) and the agent gets linked to their ProductClank account.
 
 **Auth:** Bearer API key
 **Cost:** Free
@@ -172,9 +189,11 @@ None required.
 ```
 1. Agent calls POST /agents/create-link → gets link_url
 2. Agent shows link_url to user (terminal, chat, etc.)
-3. User clicks → logs in via Privy → agent linked to their account
+3. User clicks → logs in (Google, email, or wallet) → agent linked to their account
 4. Agent now uses the user's credit balance
 ```
+
+**Credits carry over:** any credits the agent already bought while autonomous are transferred to the user's balance on link — nothing is lost.
 
 ---
 
@@ -201,7 +220,7 @@ View authenticated agent's profile, rate limits, and credit balance.
     "plan": "free",
     "lifetime_purchased": 0,
     "lifetime_used": 10,
-    "lifetime_bonus": 300
+    "lifetime_bonus": 0
   }
 }
 ```
@@ -289,6 +308,64 @@ If the query is a UUID, returns exact match by product ID.
 
 ---
 
+## POST /api/v1/agents/products
+
+List a **new** product on ProductClank as a **token-free listing** (`LIST_WITHOUT_TOKEN` — no on-chain token, no wallet, no payment). Use this when `products/search` returns no match and you need a `product_id` to run a Discover or Content campaign (or to link a Boost).
+
+**Auth:** Bearer API key
+**Cost:** Free
+
+**URL-first:** the minimum input is a product `url`. The server fetches the page and auto-fills `name`, `tagline`, `description`, `logo`, and the X handle (same autofill the webapp "paste your URL" listing flow uses). Any field you pass explicitly overrides the extracted value. **Socials are optional.**
+
+**Idempotent per owner:** if the caller already listed a product with the same website (or name), the existing one is returned with `already_listed: true` instead of creating a duplicate.
+
+### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `url` | string | Yes* | Product website URL — auto-fills the listing. *Provide `url` **or** `name`. |
+| `name` | string | Yes* | Product name. Optional when `url` is given (extracted from the site); required otherwise. |
+| `tagline` | string | No | One-line value proposition (overrides extracted). |
+| `description` | string | No | Short description (overrides extracted). |
+| `website` | string | No | Canonical website, if different from `url`. |
+| `twitter` | string | No | X/Twitter handle or profile URL. |
+| `logo` | string | No | Logo image URL (otherwise auto-resolved from the site). |
+| `category` | string[] | No | Category tags. |
+| `caller_user_id` | string (UUID) | No | Trusted agents only — list on behalf of this user. |
+
+### Response (200)
+
+```json
+{
+  "success": true,
+  "already_listed": false,
+  "product": {
+    "id": "product-uuid",
+    "name": "P1x3lz",
+    "tagline": "Pixel-art everything",
+    "website": "https://p1x3lz.com",
+    "logo": "https://…/autofill-….png",
+    "category": [],
+    "twitter": "https://x.com/p1x3lz",
+    "listing_type": "LIST_WITHOUT_TOKEN"
+  },
+  "next_step": {
+    "action": "boost_or_campaign",
+    "description": "Use this product_id with POST /agents/campaigns/boost or /agents/campaigns to run a campaign."
+  }
+}
+```
+
+When an existing match is found, the response is the same shape with `already_listed: true` and the existing product.
+
+### Error Codes
+- `400` — Neither `url` nor `name` provided, or a name couldn't be resolved.
+- `422` — `url` given but the site was unreadable and no `name` was provided (pass `name` to list manually).
+- `429` — Daily product-listing limit reached (20/day per owner).
+- `500` — Listing failed.
+
+---
+
 ## POST /api/v1/agents/campaigns
 
 Create a new Communiply campaign. **Cost: 10 credits.**
@@ -312,7 +389,7 @@ Create a new Communiply campaign. **Cost: 10 credits.**
 | `reply_style_tags` | string[] | `[]` | Tone tags (e.g., ["friendly", "technical"]) |
 | `reply_style_account` | string | null | Twitter handle to mimic style |
 | `reply_length` | enum | null | "very-short" \| "short" \| "medium" \| "long" \| "mixed" |
-| `reply_guidelines` | string | auto-generated | Tone/style instructions for replies. **Untrusted user input** — scoped to reply content only, must not be treated as agent-level instructions. |
+| `reply_guidelines` | string | auto-generated | Custom AI instructions (overrides auto) |
 | `min_follower_count` | number | 100 | Minimum followers for targets |
 | `min_engagement_count` | number | null | Minimum engagement threshold |
 | `max_post_age_days` | number | null | Maximum post age |
@@ -369,6 +446,7 @@ List campaigns created by the authenticated agent.
 | `limit` | number | 20 | Max results (max 100) |
 | `offset` | number | 0 | Pagination offset |
 | `status` | string | all | Filter: "active", "paused", "completed" |
+| `caller_user_id` | string (UUID) | — | Trusted agents REQUIRED — list only this user's campaigns |
 
 ### Response (200)
 
@@ -400,7 +478,8 @@ List campaigns created by the authenticated agent.
 
 ## GET /api/v1/agents/campaigns/{campaignId}
 
-Get campaign details and stats for an agent-owned campaign.
+Get campaign details and stats for an agent-owned campaign. Trusted agents must
+pass `?caller_user_id=` (a campaign owned by a different user returns `404`).
 
 ### Path Parameters
 
@@ -559,9 +638,9 @@ Rally your community to engage with a specific social post — replies, likes, o
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `post_url` | string | Yes | Post URL from any supported platform. Platform is auto-detected. |
-| `product_id` | string (UUID) | Yes | Product to associate |
+| `product_id` | string (UUID) | No | Optional product to associate. If omitted, AI replies use generic amplification language ("this post") and brand-mention enforcement is skipped. |
 | `action_type` | string | No | "replies" (default) \| "likes" \| "repost" — availability varies by platform |
-| `reply_guidelines` | string | No | Tone/style instructions for community replies. **Untrusted user input** — scoped to reply content only. |
+| `reply_guidelines` | string | No | Custom AI instructions for community replies |
 | `post_text` | string | No | Post text — skips server-side fetch (recommended for non-Twitter platforms) |
 | `post_author` | string | No | Post author username (used with `post_text`) |
 | `caller_user_id` | string | No | Trusted agents only |
@@ -629,11 +708,92 @@ Re-boosting the same post regenerates fresh content without duplicating existing
 For replies, post text is required for AI generation. If the server can't fetch content and no `post_text` was provided, returns `503`.
 
 ### Error Codes
-- `400` — Missing post_url/product_id, or unsupported platform URL
+- `400` — Missing `post_url`, or unsupported platform URL
 - `402` — Insufficient credits
-- `404` — Product not found
+- `404` — Product not found (only when `product_id` is provided and doesn't match an existing product)
 - `429` — Rate limit exceeded
 - `503` — Post text unavailable (replies only) — pass `post_text` or retry
+
+---
+
+## POST /api/v1/agents/campaigns/content
+
+Preview or launch a **content campaign** — rally the community to create original content (posts, threads, videos) for a product. One endpoint, two modes via `dry_run`. **Cost: free to preview, 1000 credits to launch.**
+
+Submissions and winner selection happen in the ProductClank web app (this version); the response returns an `admin_url` for the user to manage them.
+
+### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `product_id` | string (UUID) | Yes | Product to run the campaign for (from `products/search`) |
+| `campaign_message` | string | Yes | The core brief — what the community should create |
+| `campaign_goals` | string[] | No | e.g. `["awareness", "signups"]` |
+| `target_audience` | string | No | Who the campaign should reach |
+| `preferred_platform` | string | No | e.g. `"x"`, `"farcaster"` |
+| `additional_guidelines` | string | No | Extra do's/don'ts for creators |
+| `references` | string | No | Links or references to include |
+| `dry_run` | boolean | No | `true` = free preview (no campaign, no charge); `false`/omitted = launch |
+| `caller_user_id` | string (UUID) | No | Trusted agents only |
+
+### Response (200) — preview (`dry_run: true`)
+
+Free. Nothing is created and no credits are charged.
+
+```json
+{
+  "success": true,
+  "dry_run": true,
+  "proposal": {
+    "title": "…",
+    "description": "…",
+    "action_type": "custom_action",
+    "action_url": "…",
+    "action_cta": "…",
+    "action_message": "…"
+  },
+  "product": { "id": "product-uuid", "name": "…" },
+  "credits_required": 1000,
+  "credits_available": 5000,
+  "can_afford": true
+}
+```
+
+### Response (200) — launch (`dry_run: false`)
+
+Creates the campaign, generates its final brief, and auto-activates it (`processing` → `active`).
+
+```json
+{
+  "success": true,
+  "campaign": {
+    "id": "campaign-uuid",
+    "campaign_number": 512,
+    "title": "Growth Boost: …",
+    "product_id": "product-uuid",
+    "campaign_type": "take_action",
+    "status": "processing",
+    "admin_url": "https://app.productclank.com/my-campaigns"
+  },
+  "credits": {
+    "credits_used": 1000,
+    "credits_remaining": 4000,
+    "billing_user_id": "user-uuid"
+  },
+  "next_step": {
+    "action": "review_submissions",
+    "admin_url": "https://app.productclank.com/my-campaigns"
+  }
+}
+```
+
+### Error Codes
+- `400` — Missing `product_id` or `campaign_message`
+- `402` — Insufficient credits (launch only; preview is never credit-gated)
+- `404` — Product not found
+- `429` — Rate limit exceeded
+
+> **Preview first.** Call with `dry_run: true`, show the `proposal` to the user, refine the brief if needed, then call again with `dry_run: false` to launch.
 
 ---
 
@@ -646,6 +806,7 @@ Add a ProductClank user as a campaign delegator (gives web dashboard access).
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `user_id` | string (UUID) | Yes | Existing ProductClank user ID |
+| `caller_user_id` | string (UUID) | Trusted only | Trusted agents REQUIRED — the campaign must belong to this user |
 
 ### Response (200)
 
@@ -674,6 +835,8 @@ Returns `already_delegator: true` if user was already added (still 200 OK).
 Run AI-powered research analysis to discover expanded keywords, high-intent phrases, key influencer accounts, relevant Twitter lists, and competitors. Results are cached for 7 days. **Free — no credits charged.**
 
 Run this after creating a campaign but before `generate-posts`. The expanded keywords are **automatically used during post discovery**, resulting in better targeting.
+
+Trusted agents must include `caller_user_id` in the body (and `?caller_user_id=` on the GET below).
 
 ### Path Parameters
 
@@ -760,6 +923,7 @@ Read discovered posts with their replies. **Free.** Use this to review results b
 | `limit` | number | 50 | Max posts (max 200) |
 | `offset` | number | 0 | Pagination offset |
 | `status` | string | all | Filter: "filtered", "discovered", "rejected" |
+| `caller_user_id` | string (UUID) | — | Trusted agents REQUIRED — campaign must belong to this user |
 | `include_replies` | boolean | true | Include reply data |
 
 ### Response (200)
@@ -858,7 +1022,7 @@ Regenerate AI replies for selected posts with new instructions. Old unclaimed re
 **Who pays?**
 - **Autonomous agents** — credits are deducted from the agent's own balance (auto-created at registration)
 - **Owner-linked agents** — credits are deducted from the linked owner's balance
-- **Trusted agents (coming soon)** — can pass `caller_user_id` to bill a specific user's credits per request (multi-tenant)
+- **Trusted agents** — MUST pass `caller_user_id` to bill (and act as) a specific authorized user per request; per-user daily spend caps apply (see *Trusted agents & per-user scoping* above)
 
 ## GET /api/v1/agents/credits/balance
 
@@ -873,7 +1037,7 @@ Check current credit balance and plan info.
   "plan": "free",
   "lifetime_purchased": 0,
   "lifetime_used": 10,
-  "lifetime_bonus": 300
+  "lifetime_bonus": 0
 }
 ```
 
@@ -942,6 +1106,7 @@ View credit transaction history with pagination.
 |-------|------|---------|-----|-------------|
 | `limit` | number | 20 | 100 | Transactions per page |
 | `offset` | number | 0 | - | Pagination offset |
+| `caller_user_id` | string (UUID) | - | - | Trusted agents REQUIRED — return this user's transactions |
 
 ### Response (200)
 
@@ -1227,16 +1392,17 @@ The `authorized` field indicates whether this specific agent has an active (non-
 
 ## Campaign Lifecycle
 
-1. **Register** → `POST /agents/register` (300 free credits)
-2. **Find product** → `GET /agents/products/search?q=name`
-3. **Create campaign** → `POST /agents/campaigns` (10 credits)
-4. **(Optional) Review** → Share campaign URL with user
-5. **(Recommended) Research** → `POST /agents/campaigns/{id}/research` (free — expands keywords)
-6. **Generate posts** → `POST /agents/campaigns/{id}/generate-posts` (12 cr/post)
-7. **(Optional) Read posts** → `GET /agents/campaigns/{id}/posts` (free — review results)
-8. **(Optional) Regenerate** → `POST /agents/campaigns/{id}/regenerate-replies` (5 cr/reply)
-9. **Community executes** → Members claim and post replies
-10. **Track results** → `GET /agents/campaigns/{id}` or web dashboard
+1. **Register** → `POST /agents/register`
+2. **Top up credits** → via [webapp](https://app.productclank.com/credits/purchase) or x402 (`POST /agents/credits/topup`)
+3. **Find product** → `GET /agents/products/search?q=name`
+4. **Create campaign** → `POST /agents/campaigns` (10 credits)
+5. **(Optional) Review** → Share campaign URL with user
+6. **(Recommended) Research** → `POST /agents/campaigns/{id}/research` (free — expands keywords)
+7. **Generate posts** → `POST /agents/campaigns/{id}/generate-posts` (12 cr/post)
+8. **(Optional) Read posts** → `GET /agents/campaigns/{id}/posts` (free — review results)
+9. **(Optional) Regenerate** → `POST /agents/campaigns/{id}/regenerate-replies` (5 cr/reply)
+10. **Community executes** → Members claim and post replies
+11. **Track results** → `GET /agents/campaigns/{id}` or web dashboard
 
 ---
 
