@@ -3,13 +3,13 @@
 ## Getting Started
 
 **Q: Do I need to contact anyone to get an API key?**
-A: No. Self-register via `POST /api/v1/agents/register`. API key + 300 free credits are provided instantly.
+A: No. Self-register via `POST /api/v1/agents/register`. API key is provided instantly. Then top up credits via the [webapp](https://app.productclank.com/credits/purchase) or x402.
 
 **Q: Do I need USDC to start?**
-A: No. Registration includes 300 free credits — enough for ~24 posts. Buy more when they run out.
+A: You need credits to run campaigns. Top up via the [webapp](https://app.productclank.com/credits/purchase) (credit card — no crypto needed) or USDC on Base. The nano bundle ($2, 40 credits) is enough for a quick test.
 
 **Q: Is there a test environment?**
-A: No separate test API — use the 300 free credits from registration to test on production.
+A: No separate test API — use the production API with a small credit top-up (nano bundle: $2 for 40 credits).
 
 ## Campaigns
 
@@ -28,13 +28,19 @@ A: Yes, via the admin dashboard at `https://app.productclank.com/my-campaigns/co
 **Q: Which endpoint — Communiply or Boost?**
 A: Communiply for ongoing keyword-based monitoring. Boost for amplifying a specific tweet immediately. See the decision tree in SKILL.md.
 
+**Q: Do I need a product on ProductClank to launch a Boost?**
+A: No. `product_id` is **optional** on `POST /agents/campaigns/boost`. Tweet-first boosts work without one — AI replies use generic amplification language ("this post" instead of the product name) and brand-mention enforcement is skipped. Pass `product_id` when you want the boost linked to a product on ProductClank (so AI replies reference the product name and enforce mentions). Discover/Communiply campaigns (`POST /agents/campaigns`) still require `product_id`.
+
+**Q: What's the difference between a repost boost and a quote boost?**
+A: A **repost** is a bare retweet — no words from the member, 300 credits for 10. A **quote post** is a repost **with the member's own AI-drafted text**, 200 credits for 10, and it publishes to that member's own followers as their post, which makes it the highest-reach boost action. Quote posts are **X only** (`action_type: "quote"`); on any other platform the value silently falls back to `replies` at the replies price, so check `campaign.action_type` in the response. Like replies, a quote boost needs the post's text — pass `post_text` or let the server fetch it (`503` if neither works).
+
 ## Agent Setup
 
 **Q: What's the difference between autonomous and owner-linked agents?**
 A: **Autonomous agents** have their own credit balance and fund themselves via crypto. **Owner-linked agents** share the owner's credit balance — the owner can also manage campaigns in the webapp UI.
 
 **Q: How do I link my agent to my account?**
-A: Call `POST /api/v1/agents/create-link` to get a linking URL. Click it, log in via Privy, and the agent is linked.
+A: Call `POST /api/v1/agents/create-link` to get a linking URL. Click it, log in (with Google, email, or wallet), and the agent is linked.
 
 ## Account Management
 
